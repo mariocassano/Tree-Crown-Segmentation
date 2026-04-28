@@ -1,151 +1,141 @@
-
-% primo commit
-% -- ALGORITMO DI SEGMENTAZIONE DELLE CHIOME (basato sul paper di Erikson 2003) --
-% Crop Interattivo + Semi sui Picchi + Integrazione CHM
-
-% pulisco l'ambiente di lavoro
 clear; clc; close all;
-
-fprintf('=== Tree Crown Segmentation ===\n');
+fprintf('=== Tree Crown Segmentation (Erikson FAST) — START ===\n');
 tTotal = tic;
 
-%% 1. CARICAMENTO E PRE-PROCESSING (CON CROP INTERATTIVO)
-% leggo l'immagine rgb
-img = imread('ABBY_rgb/2019_ABBY_3_555000_5067000_image.tif');
-[origH, origW, bands] = size(img);
-% converto in double
-imgDouble = double(img);
+%% 1. CARICAMENTO E PRE-PROCESSING
+%  ================================================================================================================================================
 
-% Leggo il file chm (Canopy Height Model)
-chmFull = imread('ABBY_chm/NEON_D16_ABBY_DP3_555000_5067000_CHM.tif');
-% Rimuovo i valori 'NoData' (spesso -9999 nei dati NEON) e le anomalie:
-% porto tutti i valori negativi a 0 per farli corrispondere al livello del suolo.
-chmFull(chmFull < 0) = 0; 
-% converto in double
+% Carica l'immagine aerea multispettrale originale
+imgPath = "C:\\Users\\mario\\OneDrive\\Desktop\\Image processing\\immagini test\\test3\\2019_WREF_3_575000_5075000_image.tif";
+
+img = imread(imgPath);
+[origH, origW, bands] = size(img); % Estrae le dimensioni spaziali e il numero di bande
+
+imgDouble = double(img); % Converte in double per prevenire overflow durante le operazioni matematiche
+
+chmPath = "C:\\Users\\mario\\OneDrive\\Desktop\\NEON_struct-ecosystem\\NEON_struct-ecosystem\\NEON.D16.WREF.DP3.30015.001.2019-07.basic.20260313T170445Z.RELEASE-2026\\NEON_D16_WREF_DP3_575000_5075000_CHM.tif";
+
+% Carica il Canopy Height Model (CHM) che contiene i dati di altezza della vegetazione
+chmFull = imread(chmPath);
+chmFull(chmFull < 0) = 0; % Elimina i valori anomali (es. nodata negativi o artefatti del lidar)
 chmDouble = double(chmFull);
 
-% --- ALLINEAMENTO ---
-% Ridimensiono l'INTERO CHM per farlo combaciare con i pixel dell'immagine
-% ottica, prima del crop
+% ridimensiona il CHM per farlo combaciare pixel-per-pixel con l'immagine ottica.
+% L'uso di 'nearest' (nearest-neighbor) evita di interpolare e creare falsi valori di altezza.
 chmDouble_Resized = imresize(chmDouble, [origH, origW], 'nearest');
 
-% --- NORMALIZZAZIONE GLOBALE ---
-% sommo i valori dei colori dell'immagine.
-% se la somma è < 0, allora non è una sezione completamente nera (come i
-% bordi). Creo una mappa in bianco e nero dove il bianco è la foresta e il
-% nero è il bordo vuoto.
+% Crea una maschera logica per ignorare i pixel di background (completamente neri in tutte le bande)
+% Li ignori creando una maschera che vale 1 se il pixel è > 0 e vale 0 se è tutto nero
 validMask = sum(imgDouble, 3) > 0; 
 if sum(validMask(:)) == 0
-    error('L''immagine è completamente nera!');
+    error('L''immagine è completamente nera!'); % Controllo di sicurezza
 end
-% estraggo solo i pixel validi, ignorando i bordi neri. Cerco il valore min
-% e max di luminosità nella scena utilizzando i percentili e non i valori
-% assoluti per via del rumore del sensore: taglio via l'1% dei pixel
-% estremi e mi concentro sul 98% dei dati reali della foresta.
+
+% Estrae solo i pixel validi per calcolare statistiche robuste
 validPixels = imgDouble(repmat(validMask, [1 1 bands]));
-% trova la soglia sotto cui si trova solo l'1% dei pixel più scuri
-low_in = prctile(validPixels, 1);   
-% trova la soglia sopra cui si trova solo l'1% dei pixel più luminosi
-high_in = prctile(validPixels, 99); 
-% rendo tutti i valori dell'immagine compresi tra 0.0 e 1.0
+
+% Calcola il 1° e il 99° percentile per eseguire un contrast stretching che ignori gli outlier
+low_in = prctile(validPixels, 1);
+high_in = prctile(validPixels, 99);
+
+% Loop su ogni banda per normalizzare i valori nel range [0, 1]
 for b = 1:bands
     band = imgDouble(:,:,b);
-    % imposta tutti i pixel minori della soglia minima al valore minimo
-    band(band < low_in) = low_in;
-    % imposta tutti i pixel maggiori della soglia massima al valore massimo
-    band(band > high_in) = high_in;
-    % normalizza tutto tra 0.0 e 1.0
-    imgDouble(:,:,b) = (band - low_in) / (high_in - low_in);
+    band(band < low_in) = low_in;   % Clipping dei valori inferiori al 1° percentile
+    band(band > high_in) = high_in; % Clipping dei valori superiori al 99° percentile
+    imgDouble(:,:,b) = (band - low_in) / (high_in - low_in); % Normalizzazione Min-Max
 end
 
 % --- CROP INTERATTIVO ---
-% variabile booleana per decidere se utilizzare un subset dell'immagine
-% oppure l'immagine intera
 useSubset = true; 
 if useSubset
     fprintf('Seleziona un''area di foresta densa disegnando un rettangolo sull''immagine...\n');
     
+    % Mostra l'immagine normalizzata in una finestra massimizzata per facilitare la selezione
     figCrop = figure('Name', 'Seleziona l''area di test', 'WindowState', 'maximized');
     imshow(imgDouble);
-    title('traccia un rettangolo su un''area di foresta');
+    title('DISEGNA UN RETTANGOLO su un''area di foresta (poi fai doppio click per confermare)');
     
-    rect = getrect(figCrop); 
+    rect = getrect(figCrop); % Acquisisce le coordinate del rettangolo disegnato dall'utente
     close(figCrop);
     
-    % Applico il ritaglio a entrambe le matrici (rgb e chm) usando lo stesso rettangolo
+    % Ritaglia contemporaneamente l'immagine originale, quella normalizzata e il CHM
+    % garantendo il perfetto allineamento spaziale dei dati multispettrali e altimetrici
     img = imcrop(img, rect);       
     imgDouble = imcrop(imgDouble, rect); 
-    chmCrop = imcrop(chmDouble_Resized, rect); 
+    chmCrop = imcrop(chmDouble_Resized, rect); % Ora usiamo il CHM già ingrandito!
     
-    fprintf('  Crop applicato: %d x %d pixel.\n', size(img,1), size(img,2));
+    fprintf('Crop applicato: %d x %d pixel.\n', size(img,1), size(img,2));
 else
-    fprintf('Elaborazione dell''intera immagine in corso...\n');
+    % Fallback nel caso in cui si decida di elaborare l'intera immagine
+    fprintf('Elaborazione dell''INTERA IMMAGINE in corso...\n');
     chmCrop = chmDouble_Resized;
     cMin = 1; 
     rMin = 1; 
-    % utilizzo la larghezza e la l'altezza originali dell'immagine
-    cMax = origW;  
-    rMax = origH;  
+    cMax = origW;
+    rMax = origH;
 end
 
-% Aggiorno le dimensioni dell'immagine dopo l'eventuale ritaglio
-[rows, cols, ~] = size(imgDouble);
-% Applico una leggera sfocatura per aiutare i seed a cadere al centro della chioma
-% (fonde leggermente insieme i micro-picchi di luce e le micro-ombre
+[rows, cols, ~] = size(imgDouble); % Aggiorna le dimensioni dopo il potenziale ritaglio
+
+% Applica un filtro Gaussiano con deviazione standard 0.5 per ridurre il rumore ad alta frequenza
 imgDouble = imgaussfilt(imgDouble, 0.5);
 
-%% 2. PARAMETRI
-% Soglia di arresto: l'espansione si ferma se la similarità scende sotto il 5%
-ALPHA = 0.05;       
-% Deviazione standard radiometrica: modella la tolleranza alle variazioni di luminosità (ombre/foglie) nella chioma
-SIGMA1 = 0.36;    
-% Filtro morfologico (in pixel): scarta i cluster troppo piccoli (es. < 0.3 mq) considerandoli rumore o arbusti
-MIN_AREA = 30;      
-% Limite spaziale (in pixel): raggio massimo di espansione (es. 4 metri). Ottimizza i tempi e impone limiti biologici
-MAX_BOX_RADIUS = 40; 
+% Estrazione della prima banda (Near-Infrared), fondamentale per i calcoli successivi
+nir = imgDouble(:,:,1);
+
+%% 2. DEFINIZIONE DEI PARAMETRI DI SEGMENTAZIONE
+%  ========================================================================
+
+ALPHA = 0.05;       % Parametro limite per la funzione di decisione nell'espansione della regione
+SIGMA1 = 0.35;      % Tolleranza per la variazione di colore (differenza spettrale massima consentita)
+MIN_AREA = 30;      % Soglia di area minima (in pixel) per considerare un segmento come un albero valido
+MAX_BOX_RADIUS = 55; % Raggio massimo (in pixel) per la stima preliminare della chioma
+MIN_SEED_DIST = 22; % Distanza minima spaziale tra gli "starting points" (massimi locali) per evitare sovrasegmentazione
+ALTEZZA_MINIMA = 2.0; % Soglia sul dato LiDAR (CHM) in metri per escludere suolo o bassa vegetazione
+sigma_seeds = 3.5;  % Deviazione standard per uno smoothing specifico prima della ricerca dei semi (massimi)
+sigma2_init = 4; 
+LIMITE_SIGMA2 = 20
 
 %% 3. INDIVIDUAZIONE SEED POINTS (PICCHI LUMINOSI)
+%  ========================================================================
 fprintf('--- Finding Seed Points ---\n');
 
-% Maschera vegetazione (Otsu)
-% seleziono la banda del NIR
-nir = imgDouble(:,:,1);
-% Calcolo la soglia globale ottima con il metodo di Otsu
+% A Maschera vegetazione (Otsu)
+% Calcola la soglia ottimale in modo automatico invece di usare un valore fisso
+% è la linea di confine tra gli oggetti chiari, gli alberi, e gli oggetti scuri come lo sfondo, ecc
 level = graythresh(nir); 
-% Rilasso la soglia del 10% per includere i bordi meno luminosi della chioma
-nirThresh = level * 0.9; 
-% Binarizzazione: 1 = vegetazione, 0 = sfondo
-binaryTree = nir > nirThresh;
-% Apertura (erosione + dilatazione): rimuove micro-rumore isolato
-binaryTree = imopen(binaryTree, strel('disk', 1));
+nirThresh = level * 0.9; % Rilassa leggermente la soglia per non perdere i bordi delle chiome, che sono più scuri
+binaryTree = nir > nirThresh; % Binarizzazione di ogni pixel: 1 per la vegetazione potenziale, 0 per il resto
+binaryTree = imopen(binaryTree, strel('disk', 1)); % Operazione morfologica per rimuovere piccoli rumori isolati che possono ingannare l'algoritmo
 
-% MASCHERA DI ALTEZZA DAL CHM
-% considero solamente le zone che hanno un'altitudine maggiore di 2 metri
-ALTEZZA_MINIMA = 2.0; 
-maskAltezza = chmCrop >= ALTEZZA_MINIMA;
+% B) MASCHERA ALTIMETRICA DAL CHM
+maskAltezza = chmCrop >= ALTEZZA_MINIMA; % Mantiene solo i pixel che superano la soglia di altezza (es. 2m)
 
-% FUSIONE DELLE MASCHERE: Deve essere verde e alto almeno 2 metri
-binaryTree = binaryTree & maskAltezza; 
+% FUSIONE DELLE MASCHERE: Deve essere verde (Otsu) E alto almeno 2m (CHM)
+binaryTree = binaryTree & maskAltezza; % Intersezione logica (AND) per una robustezza estrema
+% ----------------------------------------------
 
-% Applico un filtro gaussiano forte, al fine di estrarre un unico picco max
-% per ogni albero
-sigma_seeds = 4.5; 
+% Creiamo una versione molto sfocata dell'infrarosso (NIR)
+% Questo serve a fondere le piccole variazioni all'interno di una chioma in un unico grande "blob"
+% trasforma i tanti picchi luminosi sull'albero mescolandoli e
+% raggruppandoli in pochi blob sfocati (molto luminosi al centro della
+% matrice, sempre più sfocati verso l'esterno)
 nir_smoothed = imgaussfilt(nir, sigma_seeds);
 
-% Trova i picchi (cime degli alberi) utilizzando la trasformata H-Maxima
-% con soglia 0.06
+% Trova i picchi (Cime degli alberi)
+% imextendedmax trova i massimi regionali, filtrando i picchi spuri inferiori alla soglia 0.06
 seedsBinary = imextendedmax(nir_smoothed, 0.06); 
-% combina con la maschera precedente 
-seedsBinary = seedsBinary & binaryTree; 
+seedsBinary = seedsBinary & binaryTree; % Mantiene solo i picchi che cadono dentro la maschera (Verdi + Alti)
 
-% estraggo le coordinate (riga e colonna) dei seed validi
+% Estrae le coordinate (righe, colonne) dei picchi trovati
 [seedRows, seedCols] = find(seedsBinary);
+
 if ~isempty(seedRows)
-    % converto le coord 2d in indici lineari 1d
     seedVals = sub2ind(size(nir), seedRows, seedCols);
     seedVals = nir(seedVals); 
-    % ordino in maniera decrescente per dare priorità agli alberi più
-    % chiari e alti
+    
+    % Ordina i semi dal più luminoso (più probabile sia una cima) al meno luminoso
     [~, sortIdx] = sort(seedVals, 'descend');
     seedList = [seedRows(sortIdx), seedCols(sortIdx)];
 else
@@ -154,25 +144,22 @@ else
 end
 fprintf('  Seeds trovati: %d\n', length(seedList));
 
-%FILTRO SPAZIALE: DISTANZA MINIMA TRA I SEMI
-% imposto la distanza a 20 pixel (2 metri reali)
-MIN_SEED_DIST = 20; 
+% --- FILTRO SPAZIALE: DISTANZA MINIMA TRA I SEMI ---
 filteredSeedList = [];
 fprintf('  Applicazione filtro spaziale (Distanza minima: %d px)...\n', MIN_SEED_DIST);
 
+% Itera sulla lista ordinata per applicare una "Non-Maximum Suppression" spaziale
 for i = 1:size(seedList, 1)
     pt = seedList(i, :);
     if isempty(filteredSeedList)
-        % il primo seme entra nella lista
-        filteredSeedList = [filteredSeedList; pt];
+        filteredSeedList = [filteredSeedList; pt]; %#ok<AGROW,AGROW> % Accetta il primo seme (il più luminoso in assoluto)
     else
-        % calcola la distanza euclidea tra il candidato e tutti i semi già
-        % inseriti nella lista
+        % Calcola la distanza euclidea tra il seme corrente e tutti i semi già accettati
         dists = sqrt((filteredSeedList(:,1) - pt(1)).^2 + (filteredSeedList(:,2) - pt(2)).^2);
-        % se la distanza minima tra il candidato e i semi già salvati è maggiore o uguale a 20, lo salva.
-        % Altrimenti, lo scarta
+        
+        % Se il seme corrente è sufficientemente lontano da TUTTI quelli già accettati, lo mantiene
         if min(dists) >= MIN_SEED_DIST
-            filteredSeedList = [filteredSeedList; pt];
+            filteredSeedList = [filteredSeedList; pt]; %#ok<AGROW,AGROW>
         end
     end
 end
@@ -180,14 +167,14 @@ seedList = filteredSeedList;
 nSeeds = size(seedList, 1);
 fprintf('  Seeds rimasti dopo il filtro spaziale: %d\n', nSeeds);
 
-%% 4. LOOP PRINCIPALE 
-% mappa finale (ogni albero avrà un id numerico)
+% 4. LOOP PRINCIPALE
+%  ========================================================================
+% Mappa finale per le etichette dei singoli alberi (Connected Components)
 finalLabelMap = zeros(rows, cols);
-% contatore degli alberi validati
 currentLabel = 0;
-% maschera globale per evitare che gli alberi si sovrappongano
-processedMask = false(rows, cols); 
 
+% Maschera logica per tracciare i pixel già assegnati ed evitare sovrapposizioni
+processedMask = false(rows, cols); 
 hWait = waitbar(0, 'Segmentazione in corso...');
 nSeeds = size(seedList, 1);
 
@@ -198,46 +185,50 @@ for k = 1:nSeeds
     
     startPt = seedList(k, :);
     
-    % se il seed corrente è stato già inglobato dall'espansione di un
-    % albero precedente, lo salto
+    % Se il punto di partenza cade in un albero già processato, saltalo
     if processedMask(startPt(1), startPt(2))
         continue;
     end
-    % fase di esplorazione: sigma2 fisso per capire le dimensioni
-    sigma2_init = 4; 
+    
+    % --- L'ALBERO APPROSSIMATO ---
     regionInit = growRegionFast(imgDouble, startPt, SIGMA1, sigma2_init, ALPHA, processedMask, MAX_BOX_RADIUS);
-    % ignoro se è un falso positivo molto piccolo
+    
     if sum(regionInit(:)) < 10
         continue; 
     end
     
-    % calcolo dinamico di sigma2 (adatto il vincolo spaziale alle
-    % dimensioni reali appena calcolate)
+    % --- STEP 3: STIMA DEI PARAMETRI ---
+    % Semplificazione vettorializzata: stima del raggio rho usando il diametro equivalente
+
+    % calcola diametro e centroide delle macchie iniziali (regionInit)
     props = regionprops(regionInit, 'EquivDiameter', 'Centroid');
-    if isempty(props), continue; end
-    % raggio stimato
+    if isempty(props)
+        continue; 
+    end
+
+    % stima del raggio rho
     rho = props(1).EquivDiameter / 2;
     
-    % Formula del paper di Erikson: sigma2 = 2*rho / sqrt(-2*ln(alpha))
+    % Calcolo di sigma_2 inversa derivato dall'Eq. 6 del paper
     denom = sqrt(-2 * log(ALPHA));
     sigma2_est = (2 * rho) / denom;
-    % Impongo un tetto massimo di sicurezza
-    sigma2_est = min(sigma2_est, 20); 
+    sigma2_est = min(sigma2_est, LIMITE_SIGMA2); % Tappo di sicurezza per non far esplodere la regione
     
-    % ottimizzazione del seed: uso il baricentro per cercare il centro più
-    % luminoso
+    % --- RICERCA NUOVI STARTING POINTS ---
+    % Invece di calcolare la normale al contorno, si crea una griglia di ricerca attorno al centroide
     cent = props(1).Centroid; 
     searchRad = max(2, round(rho * 0.5));
     
     [cGrid, rGrid] = meshgrid( -searchRad:2:searchRad, -searchRad:2:searchRad );
     candC = round(cent(1)) + cGrid(:);
-    candR = round(cent(2)) + rGrid(:);
+    candR = round(cent(2)) + rGrid(:); 
     
+    % Pulisce i punti fuori dall'immagine
     valid = candR>0 & candR<=rows & candC>0 & candC<=cols;
     candR = candR(valid);
     candC = candC(valid);
-
-    % Monte Carlo sampling: testo al max 15 candidati per velocizzare
+    
+    % Ottimizzazione delle performance: testa al massimo 15 candidati casuali
     MAX_ATTEMPTS = 15;
     if length(candR) > MAX_ATTEMPTS
         idx = randperm(length(candR), MAX_ATTEMPTS);
@@ -249,7 +240,7 @@ for k = 1:nSeeds
     bestRegion =[];
     foundCandidate = false;
     
-    % espansione finale
+    % --- STEP 5: CREAZIONE REGIONI CANDIDATE ---
     for i = 1:length(candR)
         candPt = [candR(i), candC(i)];
         
@@ -257,26 +248,26 @@ for k = 1:nSeeds
             continue;
         end
         
-        % espando la regione candidata usando il sigma2 dinamico
         candRegion = growRegionFast(imgDouble, candPt, SIGMA1, sigma2_est, ALPHA, processedMask, MAX_BOX_RADIUS);
         
+        % --- STEP 6: VERIFICA DELLE "TREE CONDITIONS" ---
         area = sum(candRegion(:));
         if area < MIN_AREA
-            continue; 
+            continue; % Condizione 1 adattata ai propri dati
         end
         
-        % check validità della regione: deve essere composta per l'85% da
-        % pixel verdi e con altezza < 2 m
         intersectTree = candRegion & binaryTree;
         ratioTree = sum(intersectTree(:)) / area;
         if ratioTree < 0.85 
-            continue; 
+            continue;
         end
         
-        % cerco il contorno più scuro
+        % --- STEP 6: SELEZIONE DELLA REGIONE MIGLIORE ---
+        % Calcola la media dei valori Infrarosso (NIR) sul perimetro della regione
         perim = bwperim(candRegion);
         meanContourVal = mean(nir(perim));
         
+        % Vince la regione con il contorno più scuro
         if meanContourVal < bestMetric
             bestMetric = meanContourVal;
             bestRegion = candRegion;
@@ -284,46 +275,50 @@ for k = 1:nSeeds
         end
     end
     
-    % salvataggio dell'albero
+    % RIMOZIONE DEI PUNTI E AGGIORNAMENTO MASCHERA ---
     if foundCandidate
         currentLabel = currentLabel + 1;
         finalLabelMap(bestRegion) = currentLabel;
-        % setto a true nella maschera la sezione appena processata per evitare
-        % sovrapposizioni successive
-        processedMask(bestRegion) = true;
+        processedMask(bestRegion) = true; % Rimuove l'albero trovato dal pool
     else
-        processedMask(startPt(1), startPt(2)) = true;
+        processedMask(startPt(1), startPt(2)) = true; % Invalida solo il seme fallato
     end
 end
 close(hWait);
 fprintf('  Segmentazione completata. Alberi trovati: %d\n', currentLabel);
-fprintf('  Tempo totale: %.2f s\n', toc(tTotal));
 
 %% 5. VISUALIZZAZIONE
-figure('Name', 'Segmentation Results', 'Position',[100 100 1200 500]);
-subplot(1,3,1);
-imshow(img); title('Original Image');
-imwrite(img, 'img_5.png');
+%  ========================================================================
+% Crea una finestra sufficientemente larga per ospitare comodamente i 3 subplot
+figure('Name', 'Erikson Fast Results', 'Position',[100 100 1200 500]);
 
+% --- PANNELLO 1: IMMAGINE ORIGINALE ---
+subplot(1,3,1);
+imshow(img); title('Originale (Crop)');
+imwrite(img, 'img_big.png'); % Salva il dato grezzo per report o paper
+
+% --- PANNELLO 2: MAPPA DELLE ETICHETTE (SEGMENTI) ---
 subplot(1,3,2);
+% Converte la mappa dei label (dove ogni albero ha un ID intero) in un'immagine RGB.
+% 'jet' è la colormap, 'k' assegna il nero allo sfondo (label 0),
+% 'shuffle' mescola i colori per massimizzare il contrasto tra alberi adiacenti.
 rgb = label2rgb(finalLabelMap, 'jet', 'k', 'shuffle');
 imshow(rgb); title(['Segmentazione (N=', num2str(currentLabel), ')']);
-imwrite(finalLabelMap, 'segmentation_img_5.png');
+imwrite(finalLabelMap, 'segmentation_img_big.png'); 
 
+% --- PANNELLO 3: CONTORNI SOVRAPPOSTI ---
 subplot(1,3,3);
-base_contours = bwperim(finalLabelMap > 0);
-% applico la dilatazione per aumentare lo spessore dei contorni
-thickness = strel('disk', 1); 
-thick_contours = imdilate(base_contours, thickness);
-color = [1 0 0];
-B = imoverlay_custom(img, thick_contours, color);
+% Estrae i bordi esterni della maschera binaria (alberi > 0)
+% e li sovrappone all'immagine originale usando il colore rosso RGB [1 0 0]
+B = imoverlay_custom(img, bwperim(finalLabelMap > 0), [1 0 0]);
 imshow(B); title('Contorni');
-imwrite(B, 'contorni_img_5.png');
+imwrite(B, 'contorni_img_big.png');
 
 %% --- PREPARAZIONE DATI PER LA VALIDAZIONE ---
 fprintf('Preparazione dei dati per la validazione...\n');
 
-% Se ho fatto il crop, utilizzo rect. Altrimenti, prendo l'intera immagine.
+% Se abbiamo fatto il crop, ricalcoliamo le coordinate assolute (bounding box) 
+% rispetto all'immagine originale per mantenere il riferimento spaziale.
 if useSubset
     cMin = max(1, round(rect(1)));
     rMin = max(1, round(rect(2)));
@@ -336,26 +331,105 @@ else
     rMax = size(finalLabelMap, 1);
 end
 
-imgPath = 'ABBY_rgb/2019_ABBY_3_555000_5067000_image.tif';
-shpPath = 'ABBY_labels/2019_ABBY_3_555000_5067000_image.shp';
-[~, R] = readgeoraster(imgPath);
-truthShapes = shaperead(shpPath);
+% Percorsi dei file: immagine raster originale e Ground Truth (GT) vettoriale
+shpPath = 'C:\Users\mario\OneDrive\Desktop\Image processing\immagini test\test3\2019_WREF_3_575000_5075000_image.shp';
 
+% Estrae l'oggetto di referenziazione spaziale (R) necessario per allineare pixel e coordinate geografiche
+[~, R] = readgeoraster(imgPath);
+truthShapes = shaperead(shpPath); % Carica i poligoni tracciati a mano (Ground Truth)
+
+% Salva l'ambiente di validazione per analisi offline o debug successivi
 save('dati_validazione.mat', 'finalLabelMap', 'cMin', 'rMin', 'cMax', 'rMax', 'R', 'truthShapes', 'chmCrop');
 fprintf('Dati salvati con successo in dati_validazione.mat!\n');
 
-%  FUNZIONI HELPER
-% -- IMPLEMENTAZIONE DELL'ALGORITMO DI "FUZZY REGION GROWING" -- 
-% calcola la probabilità che un pixel appartenga alla chioma in base a 
-% colore e distanza
+%% 6. VALIDAZIONE AUTOMATICA SULL'AREA APPENA RITAGLIATA
+fprintf('\n=== AVVIO VALIDAZIONE ===\n');
+
+% Estrae i centroidi delle chiome stimate dal tuo algoritmo
+props = regionprops(finalLabelMap, 'Centroid', 'Area');
+alberiValidi = [props.Area] >= 30; % Filtro di sicurezza aggiuntivo (coerente con MIN_AREA)
+predCentroids = cat(1, props(alberiValidi).Centroid);
+predX = predCentroids(:,1); 
+predY = predCentroids(:,2);
+
+% COSTRUZIONE GROUND TRUTH LOCALE (Sporco vs Pulito)
+dirtyGTPolygons = []; cleanGTPolygons = [];
+for i = 1:length(truthShapes)
+    polyX_W = truthShapes(i).X; polyY_W = truthShapes(i).Y;
+    
+    % Converte le coordinate geografiche (es. UTM) in coordinate intrinseche (pixel)
+    [xPix_full, yPix_full] = worldToIntrinsic(R, polyX_W, polyY_W);
+    xPix_full(isnan(xPix_full)) = []; yPix_full(isnan(yPix_full)) = [];
+    
+    % Controlla se il poligono del GT cade all'interno del crop che hai selezionato
+    if any(xPix_full >= cMin & xPix_full <= cMax) && any(yPix_full >= rMin & yPix_full <= rMax)
+        
+        % Traslazione delle coordinate: adatta il poligono alla mini-immagine croppata
+        xPix_crop = xPix_full - cMin + 1;
+        yPix_crop = yPix_full - rMin + 1;
+        
+        poligono = polyshape(xPix_crop, yPix_crop);
+        dirtyGTPolygons = [dirtyGTPolygons; poligono]; % Salva nel GT "Sporco" (tutti i poligoni)
+        
+        % Estrae il bounding box del poligono per analizzarne l'altezza sul CHM
+        boxMinX = max(1, floor(min(xPix_crop))); boxMaxX = min(size(chmCrop, 2), ceil(max(xPix_crop)));
+        boxMinY = max(1, floor(min(yPix_crop))); boxMaxY = min(size(chmCrop, 1), ceil(max(yPix_crop)));
+        chmPatch = chmCrop(boxMinY:boxMaxY, boxMinX:boxMaxX);
+        
+        % IL FILTRO "PULITO": Se dentro il poligono manuale c'è almeno un pixel alto >= 2 metri, 
+        % allora è un VERO albero e viene salvato nel GT "Pulito". Altrimenti era un errore di annotazione.
+        if max(chmPatch(:)) >= 2.0
+            cleanGTPolygons = [cleanGTPolygons; poligono];
+        end
+    end
+end
+
+% Stampa a schermo il conteggio
+fprintf('Poligoni "Sporchi" (Totali): %d\n', length(dirtyGTPolygons));
+fprintf('Poligoni "Puliti" (Filtrati): %d\n', length(cleanGTPolygons));
+
+% Verifica automatica
+if length(dirtyGTPolygons) == length(cleanGTPolygons)
+    disp('RISULTATO: Il filtro non ha eliminato nulla.');
+else
+    scartati = length(dirtyGTPolygons) - length(cleanGTPolygons);
+    disp(['RISULTATO: Il filtro ha scartato ', num2str(scartati), ' poligoni.']);
+end
+
+% CALCOLO METRICHE
+fprintf('\n--- RISULTATI AREA ANALIZZATA ---\n');
+% Calcola metriche usando il GT non filtrato
+[TP_d, FP_d, FN_d, tpPts_d, fpPts_d, matchedPolys_d, fnPolys_d, Met_d] = calcolaMetriche(predX, predY, dirtyGTPolygons);
+fprintf('SPORCA -> Precision: %.1f%% | Recall: %.1f%% | F1: %.1f%%\n', Met_d(1)*100, Met_d(2)*100, Met_d(3)*100);
+
+% Calcola metriche usando il GT filtrato dal CHM
+[TP_c, FP_c, FN_c, tpPts_c, fpPts_c, matchedPolys_c, fnPolys_c, Met_c] = calcolaMetriche(predX, predY, cleanGTPolygons);
+fprintf('PULITA -> Precision: %.1f%% | Recall: %.1f%% | F1: %.1f%%\n', Met_c(1)*100, Met_c(2)*100, Met_c(3)*100);
+
+
+
+% GRAFICI FINALI
+figRes = figure('Name', 'Confronto Validazione', 'WindowState', 'maximized');
+ax1 = subplot(1, 2, 1);
+disegnaMappa(ax1, img, 1, 1, matchedPolys_d, fnPolys_d, tpPts_d, fpPts_d, ...
+    sprintf('SPORCA (F1: %.1f%%)', Met_d(3)*100));
+ax2 = subplot(1, 2, 2);
+disegnaMappa(ax2, img, 1, 1, matchedPolys_c, fnPolys_c, tpPts_c, fpPts_c, ...
+    sprintf('PULITA (F1: %.1f%%)', Met_c(3)*100));
+linkaxes([ax1, ax2], 'xy'); % Sincronizza lo zoom/pan sui due subplot
+
+%% ========================================================================
+%%  FUNZIONI HELPER
+%% ========================================================================
 function mask = growRegionFast(img, seed, s1, s2, alpha, globalMask, maxRad)
     [H, W, ~] = size(img);
-    r0 = seed(1); c0 = seed(2);
+    r0 = seed(1); 
+    c0 = seed(2);
     
-    % ottimizzazione: non lavora sull'immagine intera ma 
-    % ritaglia un quadrato di 40 px attorno al seed 
-    rMin = max(1, r0 - maxRad); rMax = min(H, r0 + maxRad);
-    cMin = max(1, c0 - maxRad); cMax = min(W, c0 + maxRad);
+    rMin = max(1, r0 - maxRad); 
+    rMax = min(H, r0 + maxRad);
+    cMin = max(1, c0 - maxRad); 
+    cMax = min(W, c0 + maxRad);
     
     imgCrop = img(rMin:rMax, cMin:cMax, :);
     
@@ -363,41 +437,27 @@ function mask = growRegionFast(img, seed, s1, s2, alpha, globalMask, maxRad)
     lc0 = c0 - cMin + 1;
     
     [colsGrid, rowsGrid] = meshgrid(1:size(imgCrop,2), 1:size(imgCrop,1));
-    % vincolo spaziale: più ci allontaniamo dal seed, più il valore di
-    % probabilità spaziale mu2 va verso lo zero, seguendo una curva
-    % gaussiana controllata da sigma2
     distSq = (rowsGrid - lr0).^2 + (colsGrid - lc0).^2;
     mu2 = exp(-0.5 * distSq / (s2^2));
     
     seedColor = reshape(img(r0, c0, :), [1, 1, 3]);
-    % vincolo radiometrico: prendo il colore del seed e calcolo quanto ogni
-    % altro pixel nel crop è diverso da esso. Se un pixel è molto più
-    % scuro, la sua probabilità radiometrica va verso lo zero, controllata
-    % da sigma1
     diffCol = imgCrop - seedColor;
     colDistSq = sum(diffCol.^2, 3);
     mu1 = exp(-0.5 * colDistSq / (s1^2));
     
-    % la probabilità totale di appartenenza è il prodotto delle due
-    % probabilità
     muTotal = mu1 .* mu2;
-    % se il prodotto supera la soglia minima alpha, viene annesso alla
-    % regione
     localMask = muTotal > alpha;
-    % mantengo nella regione solo i pixel adiacenti al seed centrale
-    % (connettività a 8)
+    
     localMask = bwselect(localMask, lc0, lr0, 8);
-    % riempio i buchi neri all'interno della maschera
     localMask = imfill(localMask, 'holes');
     
     globalCrop = globalMask(rMin:rMax, cMin:cMax);
-    % sottraggo i pixel che appartengono già ad altri alberi 
     localMask = localMask & ~globalCrop;
+    
     mask = false(H, W);
-    % inserisco il quadrato considerato nella mappa dell'immagine originale
     mask(rMin:rMax, cMin:cMax) = localMask;
 end
-% -- FUNZIONE DI VISUALIZZAZIONE --
+
 function out = imoverlay_custom(in, mask, color)
     in = im2double(in);
     mask = logical(mask);
@@ -408,3 +468,65 @@ function out = imoverlay_custom(in, mask, color)
         out(:,:,k) = channel;
     end
 end
+
+function [TP, FP, FN, tpPts, fpPts, matchedPolys, fnPolys, Metrics] = calcolaMetriche(predX, predY, gtPolygons)
+    numPred = length(predX); numGT = length(gtPolygons);
+    matchedGT = false(numGT, 1); isTP = false(numPred, 1);
+    
+    for g = 1:numGT
+        vX = gtPolygons(g).Vertices(:,1); vY = gtPolygons(g).Vertices(:,2);
+        minVx = min(vX); maxVx = max(vX); minVy = min(vY); maxVy = max(vY);
+        
+        cands = find(predX >= minVx & predX <= maxVx & predY >= minVy & predY <= maxVy);
+        if ~isempty(cands)
+            in = inpolygon(predX(cands), predY(cands), vX, vY);
+            matchedIdx = cands(in);
+            if ~isempty(matchedIdx)
+                for m = 1:length(matchedIdx)
+                    pidx = matchedIdx(m);
+                    if ~isTP(pidx)
+                        isTP(pidx) = true; matchedGT(g) = true; 
+                        break;
+                    end
+                end
+            end
+        end
+    end
+    
+    TP = sum(isTP); FP = numPred - TP; FN = sum(~matchedGT);
+    tpPts = [predX(isTP), predY(isTP)];
+    fpPts = [predX(~isTP), predY(~isTP)];
+    matchedPolys = gtPolygons(matchedGT);
+    fnPolys = gtPolygons(~matchedGT);
+    
+    P = TP / max(1, (TP + FP)); R = TP / max(1, (TP + FN)); F1 = 2 * (P * R) / max(eps, (P + R));
+    Metrics = [P, R, F1];
+end
+
+function disegnaMappa(ax, imgSfondo, offsetX, offsetY, matchedPolys, fnPolys, tpPts, fpPts, titolo)
+    axes(ax); imshow(imgSfondo); hold on;
+    title(titolo, 'FontSize', 14);
+    
+    % Box Gialli (Veri Positivi)
+    for i = 1:length(matchedPolys)
+        vX = matchedPolys(i).Vertices(:,1) - offsetX + 1;
+        vY = matchedPolys(i).Vertices(:,2) - offsetY + 1;
+        plot(polyshape(vX, vY), 'FaceColor', 'none', 'EdgeColor', 'y', 'LineWidth', 1.5);
+    end
+    
+    % Box Rossi (Falsi Negativi)
+    for i = 1:length(fnPolys)
+        vX = fnPolys(i).Vertices(:,1) - offsetX + 1;
+        vY = fnPolys(i).Vertices(:,2) - offsetY + 1;
+        plot(polyshape(vX, vY), 'FaceColor', 'none', 'EdgeColor', 'r', 'LineWidth', 1.5);
+    end
+    
+    % Pallini Verdi (TP) e Magenta (FP)
+    if ~isempty(tpPts)
+        plot(tpPts(:,1) - offsetX + 1, tpPts(:,2) - offsetY + 1, '.g', 'MarkerSize', 15);
+    end
+    if ~isempty(fpPts)
+        plot(fpPts(:,1) - offsetX + 1, fpPts(:,2) - offsetY + 1, '.m', 'MarkerSize', 15);
+    end
+end
+
