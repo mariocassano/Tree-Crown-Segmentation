@@ -5,15 +5,19 @@ tTotal = tic;
 %% 1. CARICAMENTO E PRE-PROCESSING
 %  ================================================================================================================================================
 
+% Path dei dati: Sostituisci con i tuoi percorsi locali
 % Carica l'immagine aerea multispettrale originale
-imgPath = "C:\\Users\\mario\\OneDrive\\Desktop\\Image processing\\immagini test\\test3\\2019_WREF_3_575000_5075000_image.tif";
+imgPath = "";
+
+chmPath = "";
+
+shpPath = "";
 
 img = imread(imgPath);
 [origH, origW, bands] = size(img); % Estrae le dimensioni spaziali e il numero di bande
 
 imgDouble = double(img); % Converte in double per prevenire overflow durante le operazioni matematiche
 
-chmPath = "C:\\Users\\mario\\OneDrive\\Desktop\\NEON_struct-ecosystem\\NEON_struct-ecosystem\\NEON.D16.WREF.DP3.30015.001.2019-07.basic.20260313T170445Z.RELEASE-2026\\NEON_D16_WREF_DP3_575000_5075000_CHM.tif";
 
 % Carica il Canopy Height Model (CHM) che contiene i dati di altezza della vegetazione
 chmFull = imread(chmPath);
@@ -95,7 +99,7 @@ MIN_SEED_DIST = 22; % Distanza minima spaziale tra gli "starting points" (massim
 ALTEZZA_MINIMA = 2.0; % Soglia sul dato LiDAR (CHM) in metri per escludere suolo o bassa vegetazione
 sigma_seeds = 3.5;  % Deviazione standard per uno smoothing specifico prima della ricerca dei semi (massimi)
 sigma2_init = 4; 
-LIMITE_SIGMA2 = 20
+LIMITE_SIGMA2 = 20;
 
 %% 3. INDIVIDUAZIONE SEED POINTS (PICCHI LUMINOSI)
 %  ========================================================================
@@ -332,7 +336,6 @@ else
 end
 
 % Percorsi dei file: immagine raster originale e Ground Truth (GT) vettoriale
-shpPath = 'C:\Users\mario\OneDrive\Desktop\Image processing\immagini test\test3\2019_WREF_3_575000_5075000_image.shp';
 
 % Estrae l'oggetto di referenziazione spaziale (R) necessario per allineare pixel e coordinate geografiche
 [~, R] = readgeoraster(imgPath);
