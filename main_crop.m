@@ -7,17 +7,16 @@ tTotal = tic;
 
 % Path dei dati: Sostituisci con i tuoi percorsi locali
 % Carica l'immagine aerea multispettrale originale
-imgPath = "";
+imgPath = '/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio1/2019_WREF_3_583000_5072000_image.tif';
 
-chmPath = "";
+chmPath = '/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio1/NEON_D16_WREF_DP3_583000_5072000_CHM.tif';
 
-shpPath = "";
+shpPath = "/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio1/2019_WREF_3_583000_5072000_image.shp";
 
 img = imread(imgPath);
 [origH, origW, bands] = size(img); % Estrae le dimensioni spaziali e il numero di bande
 
 imgDouble = double(img); % Converte in double per prevenire overflow durante le operazioni matematiche
-
 
 % Carica il Canopy Height Model (CHM) che contiene i dati di altezza della vegetazione
 chmFull = imread(chmPath);
@@ -86,21 +85,33 @@ end
 imgDouble = imgaussfilt(imgDouble, 0.5);
 
 % Estrazione della prima banda (Near-Infrared), fondamentale per i calcoli successivi
-nir = imgDouble(:,:,1);
+% nir = imgDouble(:,:,1);
+
+% --- INTEGRAZIONE ICELab ---
+% Creiamo la super-banda ibrida al posto del semplice NIR
+% (Assicurati di passare a rgb2lab le 3 bande RGB corrette)
+imgLab = rgb2lab(imgDouble(:,:,1:3)); 
+comp_a = imgLab(:,:,2); % Asse verde-rosso
+comp_a_filtered = imgaussfilt(comp_a, 1.5);
+
+% Normalizzazione invertita della componente a
+comp_a_norm = (max(comp_a_filtered(:)) - comp_a_filtered) / (max(comp_a_filtered(:)) - min(comp_a_filtered(:)));
+
+% Creazione della banda ibrida per l'algoritmo (Verde + ICELab)
+% N.B. Assumiamo che la banda 2 sia il Verde.
+imgForGrowing = (0.7 * imgDouble(:,:,2)) + (0.3 * comp_a_norm);
 
 %% 2. DEFINIZIONE DEI PARAMETRI DI SEGMENTAZIONE
 %  ========================================================================
-
-ALPHA = 0.05;       % Parametro limite per la funzione di decisione nell'espansione della regione
-SIGMA1 = 0.35;      % Tolleranza per la variazione di colore (differenza spettrale massima consentita)
-MIN_AREA = 30;      % Soglia di area minima (in pixel) per considerare un segmento come un albero valido
-MAX_BOX_RADIUS = 55; % Raggio massimo (in pixel) per la stima preliminare della chioma
-MIN_SEED_DIST = 22; % Distanza minima spaziale tra gli "starting points" (massimi locali) per evitare sovrasegmentazione
-ALTEZZA_MINIMA = 2.0; % Soglia sul dato LiDAR (CHM) in metri per escludere suolo o bassa vegetazione
-sigma_seeds = 3.5;  % Deviazione standard per uno smoothing specifico prima della ricerca dei semi (massimi)
+ALPHA = 0.10;       
+SIGMA1 = 0.22;
+MIN_AREA = 30;      
+MAX_BOX_RADIUS = 40; 
+MIN_SEED_DIST = 20; 
+ALTEZZA_MINIMA = 1.7; 
+sigma_seeds = 1.8; 
 sigma2_init = 4; 
-LIMITE_SIGMA2 = 20;
-
+ratioTreeLimit = 0.85; 
 %% 3. INDIVIDUAZIONE SEED POINTS (PICCHI LUMINOSI)
 %  ========================================================================
 fprintf('--- Finding Seed Points ---\n');
@@ -108,9 +119,9 @@ fprintf('--- Finding Seed Points ---\n');
 % A Maschera vegetazione (Otsu)
 % Calcola la soglia ottimale in modo automatico invece di usare un valore fisso
 % è la linea di confine tra gli oggetti chiari, gli alberi, e gli oggetti scuri come lo sfondo, ecc
-level = graythresh(nir); 
+level = graythresh(imgForGrowing); 
 nirThresh = level * 0.9; % Rilassa leggermente la soglia per non perdere i bordi delle chiome, che sono più scuri
-binaryTree = nir > nirThresh; % Binarizzazione di ogni pixel: 1 per la vegetazione potenziale, 0 per il resto
+binaryTree = imgForGrowing > nirThresh; % Binarizzazione di ogni pixel: 1 per la vegetazione potenziale, 0 per il resto
 binaryTree = imopen(binaryTree, strel('disk', 1)); % Operazione morfologica per rimuovere piccoli rumori isolati che possono ingannare l'algoritmo
 
 % B) MASCHERA ALTIMETRICA DAL CHM
@@ -125,7 +136,7 @@ binaryTree = binaryTree & maskAltezza; % Intersezione logica (AND) per una robus
 % trasforma i tanti picchi luminosi sull'albero mescolandoli e
 % raggruppandoli in pochi blob sfocati (molto luminosi al centro della
 % matrice, sempre più sfocati verso l'esterno)
-nir_smoothed = imgaussfilt(nir, sigma_seeds);
+nir_smoothed = imgaussfilt(imgForGrowing, sigma_seeds);
 
 % Trova i picchi (Cime degli alberi)
 % imextendedmax trova i massimi regionali, filtrando i picchi spuri inferiori alla soglia 0.06
@@ -136,8 +147,8 @@ seedsBinary = seedsBinary & binaryTree; % Mantiene solo i picchi che cadono dent
 [seedRows, seedCols] = find(seedsBinary);
 
 if ~isempty(seedRows)
-    seedVals = sub2ind(size(nir), seedRows, seedCols);
-    seedVals = nir(seedVals); 
+    seedVals = sub2ind(size(imgForGrowing), seedRows, seedCols);
+    seedVals = imgForGrowing(seedVals); 
     
     % Ordina i semi dal più luminoso (più probabile sia una cima) al meno luminoso
     [~, sortIdx] = sort(seedVals, 'descend');
@@ -195,7 +206,7 @@ for k = 1:nSeeds
     end
     
     % --- L'ALBERO APPROSSIMATO ---
-    regionInit = growRegionFast(imgDouble, startPt, SIGMA1, sigma2_init, ALPHA, processedMask, MAX_BOX_RADIUS);
+    regionInit = growRegionFast(imgForGrowing, startPt, SIGMA1, sigma2_init, ALPHA, processedMask, MAX_BOX_RADIUS);
     
     if sum(regionInit(:)) < 10
         continue; 
@@ -216,7 +227,7 @@ for k = 1:nSeeds
     % Calcolo di sigma_2 inversa derivato dall'Eq. 6 del paper
     denom = sqrt(-2 * log(ALPHA));
     sigma2_est = (2 * rho) / denom;
-    sigma2_est = min(sigma2_est, LIMITE_SIGMA2); % Tappo di sicurezza per non far esplodere la regione
+    sigma2_est = min(sigma2_est*1.3, 40); % Tappo di sicurezza per non far esplodere la regione
     
     % --- RICERCA NUOVI STARTING POINTS ---
     % Invece di calcolare la normale al contorno, si crea una griglia di ricerca attorno al centroide
@@ -252,7 +263,7 @@ for k = 1:nSeeds
             continue;
         end
         
-        candRegion = growRegionFast(imgDouble, candPt, SIGMA1, sigma2_est, ALPHA, processedMask, MAX_BOX_RADIUS);
+        candRegion = growRegionFast(imgForGrowing, candPt, SIGMA1, sigma2_est, ALPHA, processedMask, MAX_BOX_RADIUS);
         
         % --- STEP 6: VERIFICA DELLE "TREE CONDITIONS" ---
         area = sum(candRegion(:));
@@ -262,14 +273,14 @@ for k = 1:nSeeds
         
         intersectTree = candRegion & binaryTree;
         ratioTree = sum(intersectTree(:)) / area;
-        if ratioTree < 0.85 
+        if ratioTree < ratioTreeLimit
             continue;
         end
         
         % --- STEP 6: SELEZIONE DELLA REGIONE MIGLIORE ---
         % Calcola la media dei valori Infrarosso (NIR) sul perimetro della regione
         perim = bwperim(candRegion);
-        meanContourVal = mean(nir(perim));
+        meanContourVal = mean(imgForGrowing(perim));
         
         % Vince la regione con il contorno più scuro
         if meanContourVal < bestMetric
@@ -425,7 +436,7 @@ linkaxes([ax1, ax2], 'xy'); % Sincronizza lo zoom/pan sui due subplot
 %%  FUNZIONI HELPER
 %% ========================================================================
 function mask = growRegionFast(img, seed, s1, s2, alpha, globalMask, maxRad)
-    [H, W, ~] = size(img);
+    [H, W, channels] = size(img); % <-- Controlla i canali
     r0 = seed(1); 
     c0 = seed(2);
     
@@ -443,9 +454,18 @@ function mask = growRegionFast(img, seed, s1, s2, alpha, globalMask, maxRad)
     distSq = (rowsGrid - lr0).^2 + (colsGrid - lc0).^2;
     mu2 = exp(-0.5 * distSq / (s2^2));
     
-    seedColor = reshape(img(r0, c0, :), [1, 1, 3]);
-    diffCol = imgCrop - seedColor;
-    colDistSq = sum(diffCol.^2, 3);
+    % --- LOGICA ADATTIVA PER I CANALI ---
+    if channels == 3
+        seedColor = reshape(img(r0, c0, :), [1, 1, 3]);
+        diffCol = imgCrop - seedColor;
+        colDistSq = sum(diffCol.^2, 3);
+    else
+        seedColor = img(r0, c0);
+        diffCol = imgCrop - seedColor;
+        colDistSq = diffCol.^2;
+    end
+    % ------------------------------------
+    
     mu1 = exp(-0.5 * colDistSq / (s1^2));
     
     muTotal = mu1 .* mu2;
