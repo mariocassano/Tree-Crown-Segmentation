@@ -7,11 +7,12 @@ tTotal = tic;
 
 % Path dei dati: Sostituisci con i tuoi percorsi locali
 % Carica l'immagine aerea multispettrale originale
-imgPath = '/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio1/2019_WREF_3_583000_5072000_image.tif';
+imgPath = '/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio3/2019_WREF_3_579000_5082000_image.tif';
 
-chmPath = '/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio1/NEON_D16_WREF_DP3_583000_5072000_CHM.tif';
+chmPath = '/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio3/NEON_D16_WREF_DP3_579000_5082000_CHM.tif';
 
-shpPath = "/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio1/2019_WREF_3_583000_5072000_image.shp";
+shpPath = '/Users/mariocassano/Desktop/POLIBA/Image Processing/Tree-Crown-Segmentation/data/esempio3/2019_WREF_3_579000_5082000_image.shp';
+
 
 img = imread(imgPath);
 [origH, origW, bands] = size(img); % Estrae le dimensioni spaziali e il numero di bande
@@ -87,29 +88,34 @@ imgDouble = imgaussfilt(imgDouble, 0.5);
 % Estrazione della prima banda (Near-Infrared), fondamentale per i calcoli successivi
 % nir = imgDouble(:,:,1);
 
-% --- INTEGRAZIONE ICELab ---
-% Creiamo la super-banda ibrida al posto del semplice NIR
-% (Assicurati di passare a rgb2lab le 3 bande RGB corrette)
-imgLab = rgb2lab(imgDouble(:,:,1:3)); 
-comp_a = imgLab(:,:,2); % Asse verde-rosso
-comp_a_filtered = imgaussfilt(comp_a, 1.5);
+%% --- INTEGRAZIONE ICELab  ---
+% Converto l'immagine normalizzata in Lab
+imgLab = rgb2lab(imgDouble); 
 
-% Normalizzazione invertita della componente a
-comp_a_norm = (max(comp_a_filtered(:)) - comp_a_filtered) / (max(comp_a_filtered(:)) - min(comp_a_filtered(:)));
+% Estraggo la componente 'a' (canale 2)
+% in MATLAB rgb2lab restituisce 'a' nel range circa [-100, 100]
+comp_a = imgLab(:,:,2); 
 
-% Creazione della banda ibrida per l'algoritmo (Verde + ICELab)
-% N.B. Assumiamo che la banda 2 sia il Verde.
-imgForGrowing = (0.7 * imgDouble(:,:,2)) + (0.3 * comp_a_norm);
+comp_a_filtered = imgaussfilt(comp_a, 1.5); % Leviga il rumore spettrale
+
+% Normalizzazione invertita
+% Utilizzo 'comp_a'
+comp_a_filtered_norm = (max(comp_a(:)) - comp_a) / (max(comp_a(:)) - min(comp_a(:)));
+
+% Creazione banda ibrida per il growing
+% Uso la banda 2 (Green) di imgDouble e la componente 'a'
+imgForGrowing = (0.65 * imgDouble(:,:,2)) + (0.35 * comp_a_filtered_norm);
 
 %% 2. DEFINIZIONE DEI PARAMETRI DI SEGMENTAZIONE
 %  ========================================================================
-ALPHA = 0.10;       
-SIGMA1 = 0.22;
-MIN_AREA = 30;      
-MAX_BOX_RADIUS = 40; 
-MIN_SEED_DIST = 20; 
-ALTEZZA_MINIMA = 1.7; 
-sigma_seeds = 1.8; 
+ALPHA = 0.08;       
+SIGMA1 = 0.17;
+MIN_AREA = 60;      
+MAX_BOX_RADIUS = 80; 
+
+MIN_SEED_DIST = 25; 
+ALTEZZA_MINIMA = 3.0; 
+sigma_seeds = 2; 
 sigma2_init = 4; 
 ratioTreeLimit = 0.85; 
 %% 3. INDIVIDUAZIONE SEED POINTS (PICCHI LUMINOSI)
@@ -435,6 +441,7 @@ linkaxes([ax1, ax2], 'xy'); % Sincronizza lo zoom/pan sui due subplot
 %% ========================================================================
 %%  FUNZIONI HELPER
 %% ========================================================================
+%{
 function mask = growRegionFast(img, seed, s1, s2, alpha, globalMask, maxRad)
     [H, W, channels] = size(img); % <-- Controlla i canali
     r0 = seed(1); 
@@ -477,6 +484,67 @@ function mask = growRegionFast(img, seed, s1, s2, alpha, globalMask, maxRad)
     globalCrop = globalMask(rMin:rMax, cMin:cMax);
     localMask = localMask & ~globalCrop;
     
+    mask = false(H, W);
+    mask(rMin:rMax, cMin:cMax) = localMask;
+end
+
+%}
+function mask = growRegionFast(img, seed, s1, s2, alpha, globalMask, maxRad)
+    [H, W, channels] = size(img); 
+    r0 = seed(1); 
+    c0 = seed(2);
+    
+    % --- 1. Limiti del crop ---
+    rMin = max(1, r0 - maxRad); 
+    rMax = min(H, r0 + maxRad);
+    cMin = max(1, c0 - maxRad); 
+    cMax = min(W, c0 + maxRad);
+    
+    imgCrop = img(rMin:rMax, cMin:cMax, :);
+    
+    % Coordinate del seme relative al crop
+    lr0 = r0 - rMin + 1;
+    lc0 = c0 - cMin + 1;
+    
+    % --- 2. Calcolo Distanza Spaziale [OTTIMIZZATO] ---
+    % Usiamo l'Implicit Expansion al posto di meshgrid. 
+    % È molto più veloce e consuma meno memoria.
+    rowsVec = (1:size(imgCrop, 1))' - lr0; % Vettore colonna
+    colsVec = (1:size(imgCrop, 2)) - lc0;  % Vettore riga
+    distSq = rowsVec.^2 + colsVec.^2;      
+    
+    mu2 = exp(-0.5 * distSq / (s2^2));
+    
+    % --- 3. Calcolo Distanza Radiometrica ---
+    if channels == 3
+        seedColor = reshape(img(r0, c0, :), [1, 1, 3]);
+        diffCol = imgCrop - seedColor;
+        colDistSq = sum(diffCol.^2, 3);
+    else
+        seedColor = img(r0, c0);
+        diffCol = imgCrop - seedColor;
+        colDistSq = diffCol.^2;
+    end
+    
+    mu1 = exp(-0.5 * colDistSq / (s1^2));
+    
+    % --- 4. Calcolo Probabilità e Soglia ---
+    muTotal = mu1 .* mu2;
+    localMask = muTotal > alpha;
+    
+    % --- 5. Estrazione Componente Connessa [OTTIMIZZATO] ---
+    % Sostituiamo bwselect (lento) con imreconstruct (fulmineo)
+    seedMask = false(size(localMask));
+    seedMask(lr0, lc0) = true; % Accendiamo solo il pixel del seme
+    localMask = imreconstruct(seedMask, localMask); % Espande il seme nella maschera
+    
+    % --- 6. Chiusura buchi e Maschera Globale ---
+    localMask = imfill(localMask, 'holes');
+    
+    globalCrop = globalMask(rMin:rMax, cMin:cMax);
+    localMask = localMask & ~globalCrop;
+    
+    % --- 7. Output ---
     mask = false(H, W);
     mask(rMin:rMax, cMin:cMax) = localMask;
 end
